@@ -1,0 +1,58 @@
+#!/usr/bin/env sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+version=$(cat "$script_dir/VERSION")
+os=$(uname -s)
+arch=$(uname -m)
+case "$os/$arch" in
+  Darwin/arm64|Darwin/aarch64) target=aarch64-apple-darwin ;;
+  Darwin/x86_64) target=x86_64-apple-darwin ;;
+  Linux/x86_64|Linux/amd64) target=x86_64-unknown-linux-gnu ;;
+  Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-gnu ;;
+  *) echo "tmux-flash: unsupported platform $os/$arch" >&2; exit 1 ;;
+esac
+
+cache_root=${XDG_CACHE_HOME:-"$HOME/.cache"}
+install_dir="$cache_root/tmux-flash/$version/$target"
+binary="$install_dir/tmux-flash"
+if [ -x "$binary" ]; then
+  printf '%s\n' "$binary"
+  exit 0
+fi
+
+asset="tmux-flash-$version-$target.tar.gz"
+repository=wheregrassdreams/tmux-flash-rs
+base="https://github.com/$repository/releases/download/v$version"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/tmux-flash.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+
+download() {
+  url=$1
+  output=$2
+  if command -v gh >/dev/null 2>&1; then
+    if gh release download "v$version" --repo "$repository" --pattern "$(basename "$output")" --dir "$tmp" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  curl --fail --location --silent --show-error "$url" --output "$output"
+}
+
+archive="$tmp/$asset"
+checksum="$tmp/$asset.sha256"
+download "$base/$asset" "$archive"
+download "$base/$asset.sha256" "$checksum"
+expected=$(cat "$checksum")
+case "$target" in
+  *apple-darwin) actual=$(shasum -a 256 "$archive" | awk '{print $1}') ;;
+  *) actual=$(sha256sum "$archive" | awk '{print $1}') ;;
+esac
+if [ "$actual" != "$expected" ]; then
+  echo "tmux-flash: checksum mismatch for $asset" >&2
+  exit 1
+fi
+
+mkdir -p "$install_dir"
+tar -xzf "$archive" -C "$install_dir" tmux-flash
+chmod 755 "$binary"
+printf '%s\n' "$binary"
