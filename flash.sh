@@ -9,49 +9,45 @@ if [[ -z "$BIN" || ! -x "$BIN" ]]; then
   tmux set-option -gq @_tmux-flash-binary "$BIN"
 fi
 
-snapshot="$(tmux display-message -p '#{pane_id};#{scroll_position};#{copy_cursor_x};#{copy_cursor_y};#{pane_width};#{pane_height};#{pane_in_mode}')"
+pane="$(tmux display-message -p '#{pane_id}')"
+if [[ "$(tmux show-option -pqv -t "$pane" @tmux-flash-active)" == 1 ]]; then
+  exit 0
+fi
+
+if [[ "$(tmux display-message -p -t "$pane" '#{pane_mode}')" != copy-mode ]]; then
+  tmux copy-mode -t "$pane"
+fi
+
+snapshot="$(tmux display-message -p -t "$pane" '#{pane_id};#{scroll_position};#{copy_cursor_x};#{copy_cursor_y};#{pane_width};#{pane_height};#{pane_in_mode};#{window_zoomed_flag}')"
 info="$snapshot"
-IFS=';' read -r pane scroll cx cy width height inmode <<<"$info"
+IFS=';' read -r pane scroll cx cy width height inmode zoomed <<<"$info"
 [[ "$inmode" == 1 ]] || exit 0
 
 start=$((0 - scroll))
 end=$((height - scroll - 1))
 capture="$(mktemp)"
 trap 'rm -f -- "$capture"' EXIT HUP INT TERM
-tmux capture-pane -p -t "$pane" -S "$start" -E "$end" > "$capture"
+# -M captures copy-mode's backing screen. Its default range is the bottom
+# viewport, so apply scroll_position to read the viewport currently on screen.
+tmux capture-pane -p -M -t "$pane" -S "$start" -E "$end" > "$capture"
 
 # The cursor, viewport, and geometry above must describe the captured rows.
 # They are queried separately from capture-pane, so reject a snapshot if the
 # pane changed while the capture was being taken.
-after_capture="$(tmux display-message -p -t "$pane" '#{pane_id};#{scroll_position};#{copy_cursor_x};#{copy_cursor_y};#{pane_width};#{pane_height};#{pane_in_mode}')"
+after_capture="$(tmux display-message -p -t "$pane" '#{pane_id};#{scroll_position};#{copy_cursor_x};#{copy_cursor_y};#{pane_width};#{pane_height};#{pane_in_mode};#{window_zoomed_flag}')"
 if [[ "$after_capture" != "$snapshot" ]]; then
   tmux display-message -d 2500 -t "$pane" 'tmux-flash: pane changed during capture; retry flash'
   exit 0
 fi
-user_options="$(tmux show-options -g)"
+labels="$(tmux show-option -gqv '@flash-labels')"
+args=(--orig "$pane" --capture "$capture" --cx "$cx" --cy "$cy" --scroll "$scroll" --width "$width" --height "$height")
+if [[ -n "$labels" ]]; then args+=(--labels "$labels"); fi
+if [[ "$zoomed" == 1 ]]; then args+=(--original-zoomed); fi
 
-labels=""
-theme=""
-while IFS=' ' read -r name value; do
-  case "$name" in
-    @flash-labels) labels="$value" ;;
-    @flash-colors) theme="$value" ;;
-  esac
-done <<<"$user_options"
-
-args=(--orig "$pane" --capture "$capture" --cx "$cx" --cy "$cy" --width "$width" --height "$height" --labels "${labels:-asdfghjklqwertyuiopzxcvbnm}")
-if [[ -n "$theme" ]]; then
-  IFS=',' read -r -a pairs <<<"$theme"
-  for pair in "${pairs[@]}"; do
-    name="${pair%%=*}"
-    value="${pair#*=}"
-    case "$name" in
-      backdrop|match-fg|match-bg|current-fg|current-bg|label-fg|label-bg|status|status-error)
-        if [[ -n "$value" && "$pair" != "$name" ]]; then args+=("--color-$name" "$value"); fi
-        ;;
-    esac
-  done
-fi
+for name in backdrop match-fg match-bg current-fg current-bg label-fg label-bg status status-error; do
+  value="$(tmux show-option -gqv "@flash-color-$name")"
+  if [[ -n "$value" ]]; then args+=("--color-$name" "$value"); fi
+done
 
 command="'$BIN'"
 for arg in "${args[@]}"; do
@@ -65,4 +61,11 @@ tmux resize-window -t "$replica" -x "$width" -y "$height"
 tmux set-option -p -t "$replica" @tmux-flash-active 1
 tmux set-hook -p -t "$replica" 'after-copy-mode[tmux-flash-rs-guard]' \
   'if-shell -F "#{==:#{@tmux-flash-active},1}" "send-keys -X cancel"'
-tmux swap-pane -s "$replica" -t "$pane" \; select-pane -t "$replica"
+if [[ "$zoomed" == 1 ]]; then
+  tmux swap-pane -s "$replica" -t "$pane" \; \
+    resize-pane -Z -t "$replica" \; \
+    select-pane -t "$replica"
+else
+  tmux swap-pane -s "$replica" -t "$pane" \; \
+    select-pane -t "$replica"
+fi

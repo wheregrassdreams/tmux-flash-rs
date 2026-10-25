@@ -46,6 +46,8 @@ impl Default for Colors {
 struct Options {
     original: String,
     capture: String,
+    original_zoomed: bool,
+    scroll_position: usize,
     labels: String,
     cursor_x: usize,
     cursor_y: usize,
@@ -54,10 +56,17 @@ struct Options {
     colors: Colors,
 }
 
-fn parse_options() -> Result<Options, String> {
+enum CliOptions {
+    Help,
+    Run(Options),
+}
+
+fn parse_options() -> Result<CliOptions, String> {
     let mut options = Options {
         original: String::new(),
         capture: String::new(),
+        original_zoomed: false,
+        scroll_position: 0,
         labels: DEFAULT_LABELS.into(),
         cursor_x: 0,
         cursor_y: 0,
@@ -68,7 +77,11 @@ fn parse_options() -> Result<Options, String> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            return Err(usage().into());
+            return Ok(CliOptions::Help);
+        }
+        if arg == "--original-zoomed" {
+            options.original_zoomed = true;
+            continue;
         }
         let value = args
             .next()
@@ -76,6 +89,7 @@ fn parse_options() -> Result<Options, String> {
         match arg.as_str() {
             "--orig" => options.original = value,
             "--capture" => options.capture = value,
+            "--scroll" => options.scroll_position = parse_number(&arg, &value)?,
             "--labels" => options.labels = value,
             "--cx" => options.cursor_x = parse_number(&arg, &value)?,
             "--cy" => options.cursor_y = parse_number(&arg, &value)?,
@@ -103,11 +117,20 @@ fn parse_options() -> Result<Options, String> {
             usage()
         ));
     }
-    Ok(options)
+    validate_labels(&options.labels)?;
+    options.colors.validate()?;
+    Ok(CliOptions::Run(options))
 }
 
 fn usage() -> &'static str {
-    "usage: tmux-flash --orig PANE --capture FILE --width COLS --height ROWS [--cx N --cy N --labels ALPHABET]"
+    "usage: tmux-flash --orig PANE --capture FILE --width COLS --height ROWS [OPTIONS]\n\
+     options:\n\
+       --cx N --cy N                 copy-mode cursor position (default: 0, 0)\n\
+       --scroll N                    copy-mode scroll position (default: 0)\n\
+       --labels ALPHABET             unique printable ASCII jump labels\n\
+       --color-NAME '#RRGGBB'        override a display color\n\
+       --original-zoomed             restore the source pane's zoom state\n\
+       -h, --help                    show this help"
 }
 
 fn parse_number(name: &str, value: &str) -> Result<usize, String> {
@@ -116,24 +139,70 @@ fn parse_number(name: &str, value: &str) -> Result<usize, String> {
         .map_err(|_| format!("invalid value for {name}: {value}"))
 }
 
-fn rgb(color: &str, foreground: bool) -> String {
+fn validate_color(name: &str, color: &str) -> Result<(), String> {
     let value = color.strip_prefix('#').unwrap_or(color);
-    if value.len() != 6 {
-        return String::new();
+    if value.len() != 6 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "invalid value for --color-{name}: {color}; expected #RRGGBB"
+        ));
     }
-    let Ok(red) = u8::from_str_radix(&value[0..2], 16) else {
-        return String::new();
-    };
-    let Ok(green) = u8::from_str_radix(&value[2..4], 16) else {
-        return String::new();
-    };
-    let Ok(blue) = u8::from_str_radix(&value[4..6], 16) else {
-        return String::new();
-    };
-    format!(
+
+    Ok(())
+}
+
+impl Colors {
+    fn validate(&self) -> Result<(), String> {
+        for (name, color) in [
+            ("backdrop", &self.backdrop),
+            ("match-fg", &self.match_fg),
+            ("match-bg", &self.match_bg),
+            ("current-fg", &self.current_fg),
+            ("current-bg", &self.current_bg),
+            ("label-fg", &self.label_fg),
+            ("label-bg", &self.label_bg),
+            ("status", &self.status),
+            ("status-error", &self.status_error),
+        ] {
+            validate_color(name, color)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_labels(labels: &str) -> Result<(), String> {
+    if labels.is_empty() {
+        return Err("--labels must contain at least one printable ASCII character".into());
+    }
+
+    let mut seen = [false; 128];
+    for byte in labels.bytes() {
+        if !(b'!'..=b'~').contains(&byte) {
+            return Err("--labels accepts printable, non-space ASCII characters only".into());
+        }
+        if seen[byte as usize] {
+            return Err(format!(
+                "--labels contains duplicate character {:?}",
+                byte as char
+            ));
+        }
+        seen[byte as usize] = true;
+    }
+    Ok(())
+}
+
+fn rgb(color: &str, foreground: bool) -> Option<String> {
+    let value = color.strip_prefix('#').unwrap_or(color);
+    if value.len() != 6 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let red = u8::from_str_radix(std::str::from_utf8(&bytes[0..2]).ok()?, 16).ok()?;
+    let green = u8::from_str_radix(std::str::from_utf8(&bytes[2..4]).ok()?, 16).ok()?;
+    let blue = u8::from_str_radix(std::str::from_utf8(&bytes[4..6]).ok()?, 16).ok()?;
+    Some(format!(
         ";{};2;{red};{green};{blue}",
         if foreground { 38 } else { 48 }
-    )
+    ))
 }
 
 fn sgr(fg: &str, bg: &str, bold: bool) -> String {
@@ -141,7 +210,7 @@ fn sgr(fg: &str, bg: &str, bold: bool) -> String {
     if bold {
         parts.push("1".into());
     }
-    for color in [rgb(fg, true), rgb(bg, false)] {
+    for color in [rgb(fg, true), rgb(bg, false)].into_iter().flatten() {
         if !color.is_empty() {
             parts.push(color.trim_start_matches(';').to_owned());
         }
@@ -159,9 +228,20 @@ fn tmux(args: &[&str]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn tmux_output(args: &[&str]) -> io::Result<String> {
+    let output = Command::new("tmux").args(args).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 struct PaneRestore {
     me: String,
     original: String,
+    original_zoomed: bool,
     restored: bool,
 }
 
@@ -171,7 +251,18 @@ impl PaneRestore {
             return;
         }
         self.restored = true;
-        let _ = tmux(&["swap-pane", "-s", &self.me, "-t", &self.original]);
+        let mut restore = vec![
+            "swap-pane",
+            "-s",
+            self.me.as_str(),
+            "-t",
+            self.original.as_str(),
+        ];
+        if self.original_zoomed {
+            restore.extend([";", "resize-pane", "-Z", "-t", self.original.as_str()]);
+        }
+        restore.extend([";", "select-pane", "-t", self.original.as_str()]);
+        let _ = tmux(&restore);
         let _ = tmux(&[
             "set-hook",
             "-p",
@@ -188,7 +279,6 @@ impl PaneRestore {
             &self.me,
             "@tmux-flash-active",
         ]);
-        let _ = tmux(&["select-pane", "-t", &self.original]);
     }
 }
 
@@ -233,34 +323,164 @@ fn grapheme_index_at_column(line: &str, column: usize) -> usize {
     line.graphemes(true).count()
 }
 
+fn restored_copy_view(original: &str) -> io::Result<(Vec<String>, usize)> {
+    let snapshot = tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        original,
+        "#{scroll_position};#{pane_height};#{copy_cursor_y};#{pane_in_mode}",
+    ])?;
+    let mut fields = snapshot.split(';');
+    let scroll = fields
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| io::Error::other("invalid copy-mode scroll position"))?;
+    let height = fields
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| io::Error::other("invalid copy-mode pane height"))?;
+    let cursor_y = fields
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| io::Error::other("invalid copy-mode cursor row"))?;
+    if fields.next() != Some("1") {
+        return Err(io::Error::other("source pane left copy-mode"));
+    }
+
+    let start = (0isize - scroll as isize).to_string();
+    let end = (height as isize - scroll as isize - 1).to_string();
+    let capture = tmux_output(&[
+        "capture-pane",
+        "-p",
+        "-M",
+        "-t",
+        original,
+        "-S",
+        &start,
+        "-E",
+        &end,
+    ])?;
+    let capture = capture.strip_suffix('\n').unwrap_or(&capture);
+    let lines = capture.split('\n').map(str::to_owned).collect();
+    Ok((lines, cursor_y))
+}
+
+fn locate_match(
+    lines: &[String],
+    expected_line: &str,
+    expected_row: usize,
+    expected_column: usize,
+    needle: &str,
+) -> Option<(usize, usize)> {
+    let needle: Vec<&str> = needle.graphemes(true).collect();
+    if needle.is_empty() {
+        return None;
+    }
+
+    lines
+        .iter()
+        .enumerate()
+        .flat_map(|(row, line)| {
+            if line != expected_line {
+                return Vec::new();
+            }
+            let graphemes: Vec<&str> = line.graphemes(true).collect();
+            if needle.len() > graphemes.len() {
+                return Vec::new();
+            }
+            (0..=graphemes.len() - needle.len())
+                .filter(|&start| graphemes[start..start + needle.len()] == needle)
+                .map(|start| {
+                    (
+                        (row.abs_diff(expected_row), start.abs_diff(expected_column)),
+                        (row, start),
+                    )
+                })
+                .collect()
+        })
+        .min_by_key(|(score, _)| *score)
+        .map(|(_, position)| position)
+}
+
 fn jump(
     original: &str,
     row: usize,
-    cursor_y: usize,
+    original_scroll: usize,
     line: &str,
     grapheme_index: usize,
+    needle: &str,
 ) -> io::Result<()> {
     if tmux(&["display-message", "-p", "-t", original, "#{pane_in_mode}"])? != "1" {
         return Ok(());
     }
-    if row > cursor_y {
+
+    let current_scroll = tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        original,
+        "#{scroll_position}",
+    ])?
+    .parse::<usize>()
+    .map_err(|error| io::Error::other(format!("invalid copy-mode scroll position: {error}")))?;
+    if original_scroll > current_scroll {
         tmux(&[
             "send-keys",
             "-X",
             "-t",
             original,
             "-N",
-            &(row - cursor_y).to_string(),
+            &(original_scroll - current_scroll).to_string(),
+            "scroll-up",
+        ])?;
+    } else if current_scroll > original_scroll {
+        tmux(&[
+            "send-keys",
+            "-X",
+            "-t",
+            original,
+            "-N",
+            &(current_scroll - original_scroll).to_string(),
+            "scroll-down",
+        ])?;
+    }
+
+    let mut cursor_y = tmux(&["display-message", "-p", "-t", original, "#{copy_cursor_y}"])?
+        .parse::<usize>()
+        .map_err(|error| io::Error::other(format!("invalid copy cursor row: {error}")))?;
+    let mut target_row = row;
+    let mut target_column = grapheme_index;
+    let mut target_line = line.to_owned();
+    if let Ok((lines, restored_cursor_y)) = restored_copy_view(original) {
+        cursor_y = restored_cursor_y;
+        if let Some((restored_row, restored_column)) =
+            locate_match(&lines, line, row, grapheme_index, needle)
+        {
+            target_row = restored_row;
+            target_column = restored_column;
+            target_line = lines[restored_row].clone();
+        }
+    }
+
+    if target_row > cursor_y {
+        tmux(&[
+            "send-keys",
+            "-X",
+            "-t",
+            original,
+            "-N",
+            &(target_row - cursor_y).to_string(),
             "cursor-down",
         ])?;
-    } else if cursor_y > row {
+    } else if cursor_y > target_row {
         tmux(&[
             "send-keys",
             "-X",
             "-t",
             original,
             "-N",
-            &(cursor_y - row).to_string(),
+            &(cursor_y - target_row).to_string(),
             "cursor-up",
         ])?;
     }
@@ -270,25 +490,25 @@ fn jump(
     let cursor_x = tmux(&["display-message", "-p", "-t", original, "#{copy_cursor_x}"])?
         .parse::<usize>()
         .map_err(|error| io::Error::other(format!("invalid copy cursor column: {error}")))?;
-    let cursor_index = grapheme_index_at_column(line, cursor_x);
-    if grapheme_index > cursor_index {
+    let cursor_index = grapheme_index_at_column(&target_line, cursor_x);
+    if target_column > cursor_index {
         tmux(&[
             "send-keys",
             "-X",
             "-t",
             original,
             "-N",
-            &(grapheme_index - cursor_index).to_string(),
+            &(target_column - cursor_index).to_string(),
             "cursor-right",
         ])?;
-    } else if cursor_index > grapheme_index {
+    } else if cursor_index > target_column {
         tmux(&[
             "send-keys",
             "-X",
             "-t",
             original,
             "-N",
-            &(cursor_index - grapheme_index).to_string(),
+            &(cursor_index - target_column).to_string(),
             "cursor-left",
         ])?;
     }
@@ -734,6 +954,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut panes = PaneRestore {
         me,
         original: options.original.clone(),
+        original_zoomed: options.original_zoomed,
         restored: false,
     };
     let capture = fs::read_to_string(&options.capture)?;
@@ -805,13 +1026,19 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Some(found) = matches.first() {
                     let line = search.line(found.row);
+                    let needle = line
+                        .graphemes(true)
+                        .skip(found.start)
+                        .take(found.end - found.start)
+                        .collect::<String>();
                     panes.restore();
                     jump(
                         &options.original,
                         found.row,
-                        options.cursor_y,
+                        options.scroll_position,
                         line,
                         found.start,
+                        &needle,
                     )?;
                 } else {
                     panes.restore();
@@ -830,13 +1057,19 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         return Ok(());
                     }
                     let line = search.line(found.row);
+                    let needle = line
+                        .graphemes(true)
+                        .skip(found.start)
+                        .take(found.end - found.start)
+                        .collect::<String>();
                     panes.restore();
                     jump(
                         &options.original,
                         found.row,
-                        options.cursor_y,
+                        options.scroll_position,
                         line,
                         found.start,
+                        &needle,
                     )?;
                     return Ok(());
                 }
@@ -850,7 +1083,11 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() {
     let options = match parse_options() {
-        Ok(options) => options,
+        Ok(CliOptions::Help) => {
+            println!("{}", usage());
+            return;
+        }
+        Ok(CliOptions::Run(options)) => options,
         Err(error) => {
             eprintln!("tmux-flash: {error}");
             std::process::exit(2);
@@ -870,6 +1107,8 @@ mod tests {
         Options {
             original: "%1".into(),
             capture: String::new(),
+            original_zoomed: false,
+            scroll_position: 0,
             labels: "a".into(),
             cursor_x: 0,
             cursor_y: 0,

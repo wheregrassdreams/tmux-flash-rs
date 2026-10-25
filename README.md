@@ -22,45 +22,84 @@ verifies the published SHA-256 file before extraction. If the repository is
 private, authenticate with `gh auth login`; public releases can be fetched with
 `curl` alone.
 
+For a manual installation, clone the repository and source its TPM entrypoint:
+
+```sh
+git clone https://github.com/wheregrassdreams/tmux-flash-rs ~/.tmux/plugins/tmux-flash-rs
+```
+
+```tmux
+run-shell ~/.tmux/plugins/tmux-flash-rs/tmux-flash.tmux
+```
+
+Set any `@flash-*` options before the `run-shell` line so the entrypoint can
+install the configured bindings.
+
 Supported release targets are macOS arm64 and x86_64, and Linux arm64 and
 x86_64.
 
 ## Usage
 
-Set `mode-keys vi`, enter copy mode with `prefix + [`, then press `s` and type a
-search pattern. Press a displayed label to jump to that match, or Enter to jump
-to the nearest match. Backspace edits the query; Escape or Ctrl-C cancels. To
-extend an existing selection, press `v` before `s`, then use the label and `y`
-to yank the selected range.
+With the default binding, set `mode-keys vi`, enter copy mode with `prefix + [`,
+then press `s` and type a search pattern. You can also bind keys in the prefix
+or root table to start Flash from a normal pane; Flash enters copy mode before
+capturing it. Press a displayed label to jump to that match, or Enter to jump
+to the nearest match. Backspace edits the query; Escape or Ctrl-C cancels and
+leaves the pane in copy mode. To extend an existing selection, press `v` before
+starting Flash, then use the label and `y` to yank the selected range.
+
+Flash searches the visible pane viewport. If the pane's dimensions actually
+change while Flash is active, the search is cancelled; a resize signal with no
+dimension change does not cancel it. Entering Flash from a zoomed pane keeps the
+pane zoomed, and restores that zoom state when Flash exits.
 
 While flash is active, a pane-local tmux hook immediately exits any copy mode
 started on the flash pane. This works regardless of the key or mouse action
 used to request copy mode. The hook uses its own array entry, so other
 `after-copy-mode` hooks on the pane remain installed and run as usual.
 
-`@flash-key` selects one trigger key (default `s`). `@flash-keys` selects
-multiple trigger keys and accepts a space- or comma-separated list; when set,
-it takes precedence over `@flash-key`. `@flash-labels` controls the label
-alphabet. `@flash-colors` accepts comma-separated `name=#RRGGBB` values for
-`backdrop`, `match-fg`, `match-bg`, `current-fg`, `current-bg`, `label-fg`,
-`label-bg`, `status`, and `status-error`.
+`@flash-copy-mode-vi-keys` selects one or more keys in the vi copy-mode table
+(default `s`). `@flash-prefix-keys` selects keys in the prefix table; press the
+configured tmux prefix, then one of these keys. `@flash-root-keys` selects keys
+in the root table, which trigger without a prefix and can intercept keys from
+applications inside panes. All three accept space-separated key names. The
+prefix and root lists are empty by default.
+
+`@flash-labels` controls the label alphabet and must contain unique, printable,
+non-space ASCII characters.
+
+Colors are configured independently with `@flash-color-backdrop`,
+`@flash-color-match-fg`, `@flash-color-match-bg`, `@flash-color-current-fg`,
+`@flash-color-current-bg`, `@flash-color-label-fg`, `@flash-color-label-bg`,
+`@flash-color-status`, and `@flash-color-status-error`. Each value accepts
+`#RRGGBB` (the leading `#` is optional).
 
 ```tmux
-set -g @flash-key 's'
-# set -g @flash-keys 's C-s M-s'
+set -g @flash-copy-mode-vi-keys 's C-s'
+set -g @flash-prefix-keys 'f'
+# set -g @flash-root-keys 'M-f'
 set -g @flash-labels 'asdfghjklqwertyuiopzxcvbnm'
+set -g @flash-color-match-bg '#385d8a'
+set -g @flash-color-current-bg '#23734f'
 ```
 
 ## Unicode behavior
 
-Search and labels operate on grapheme clusters. Match proximity and jump
-positions use terminal cell columns, so CJK characters and emoji do not shift
-the selected location. Tests cover CJK text, emoji including joined sequences,
-combining marks, ASCII smart-case matching, and label assignment.
+Search operates on grapheme clusters. Match proximity and jump positions use
+terminal cell columns, so CJK characters and emoji do not shift the selected
+location. Jump labels are restricted to single-column printable ASCII so each
+label maps to one keypress and one terminal cell.
+
+## Inspiration
+
+[tmux-flash](https://github.com/AndreVicencio/tmux-flash) is the direct
+reference for this project's tmux workflow. Its search-and-label interaction
+traces back to [flash.nvim](https://github.com/folke/flash.nvim), the origin of
+the Flash interaction model.
 
 ## Release process
 
-Push a semantic version tag such as `v0.1.0` to `wheregrassdreams/tmux-flash-rs`.
+Push a semantic version tag such as `vX.Y.Z` to `wheregrassdreams/tmux-flash-rs`.
 The release workflow builds the four supported targets, archives each
 `tmux-flash` binary, writes a SHA-256
 sidecar, and attaches both files to the GitHub Release. The TPM installer picks
@@ -90,7 +129,7 @@ GitHub-hosted runner toolchains and do not need this setting.
 ## Requirements
 
 - tmux 3.1 or newer
-- `mode-keys vi`
+- `mode-keys vi` when using `@flash-copy-mode-vi-keys` (the default binding)
 - For a private GitHub repository, GitHub CLI authentication for first install
 
 The plugin has no dependency on tmux-config or other tmux plugins.
