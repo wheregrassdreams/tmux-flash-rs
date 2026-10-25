@@ -3,9 +3,17 @@
 set -euo pipefail
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-key="$(tmux show-option -gqv '@flash-key')"
+keys="$(tmux show-option -gqv '@flash-keys')"
+if [[ -z "$keys" ]]; then
+  keys="$(tmux show-option -gqv '@flash-key')"
+fi
+keys="${keys:-s}"
+keys="${keys//,/ }"
+read -r -a keys <<<"$keys"
 
-tmux bind-key -T copy-mode-vi "${key:-s}" run-shell -b "$CURRENT_DIR/flash.sh"
+for key in "${keys[@]}"; do
+  tmux bind-key -T copy-mode-vi "$key" run-shell -b "$CURRENT_DIR/flash.sh"
+done
 
 # Resolve/download the matching prebuilt binary on plugin load. No Rust toolchain
 # is needed on the user's machine; flash.sh retries if this first install fails.

@@ -33,13 +33,21 @@ to the nearest match. Backspace edits the query; Escape or Ctrl-C cancels. To
 extend an existing selection, press `v` before `s`, then use the label and `y`
 to yank the selected range.
 
-`@flash-key` selects the trigger key (default `s`). `@flash-labels` controls
-the label alphabet. `@flash-colors` accepts comma-separated `name=#RRGGBB`
-values for `backdrop`, `match-fg`, `match-bg`, `current-fg`, `current-bg`,
-`label-fg`, `label-bg`, `status`, and `status-error`.
+While flash is active, a pane-local tmux hook immediately exits any copy mode
+started on the flash pane. This works regardless of the key or mouse action
+used to request copy mode. The hook uses its own array entry, so other
+`after-copy-mode` hooks on the pane remain installed and run as usual.
+
+`@flash-key` selects one trigger key (default `s`). `@flash-keys` selects
+multiple trigger keys and accepts a space- or comma-separated list; when set,
+it takes precedence over `@flash-key`. `@flash-labels` controls the label
+alphabet. `@flash-colors` accepts comma-separated `name=#RRGGBB` values for
+`backdrop`, `match-fg`, `match-bg`, `current-fg`, `current-bg`, `label-fg`,
+`label-bg`, `status`, and `status-error`.
 
 ```tmux
 set -g @flash-key 's'
+# set -g @flash-keys 's C-s M-s'
 set -g @flash-labels 'asdfghjklqwertyuiopzxcvbnm'
 ```
 

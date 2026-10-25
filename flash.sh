@@ -9,9 +9,8 @@ if [[ -z "$BIN" || ! -x "$BIN" ]]; then
   tmux set-option -gq @_tmux-flash-binary "$BIN"
 fi
 
-snapshot="$(tmux display-message -p '#{pane_id};#{scroll_position};#{copy_cursor_x};#{copy_cursor_y};#{pane_width};#{pane_height};#{pane_in_mode}' \; show-options -g)"
-info="${snapshot%%$'\n'*}"
-user_options="${snapshot#*$'\n'}"
+snapshot="$(tmux display-message -p '#{pane_id};#{scroll_position};#{copy_cursor_x};#{copy_cursor_y};#{pane_width};#{pane_height};#{pane_in_mode}')"
+info="$snapshot"
 IFS=';' read -r pane scroll cx cy width height inmode <<<"$info"
 [[ "$inmode" == 1 ]] || exit 0
 
@@ -20,6 +19,16 @@ end=$((height - scroll - 1))
 capture="$(mktemp)"
 trap 'rm -f -- "$capture"' EXIT HUP INT TERM
 tmux capture-pane -p -t "$pane" -S "$start" -E "$end" > "$capture"
+
+# The cursor, viewport, and geometry above must describe the captured rows.
+# They are queried separately from capture-pane, so reject a snapshot if the
+# pane changed while the capture was being taken.
+after_capture="$(tmux display-message -p -t "$pane" '#{pane_id};#{scroll_position};#{copy_cursor_x};#{copy_cursor_y};#{pane_width};#{pane_height};#{pane_in_mode}')"
+if [[ "$after_capture" != "$snapshot" ]]; then
+  tmux display-message -d 2500 -t "$pane" 'tmux-flash: pane changed during capture; retry flash'
+  exit 0
+fi
+user_options="$(tmux show-options -g)"
 
 labels=""
 theme=""
@@ -53,4 +62,7 @@ replica="$(tmux new-window -dP -F '#{pane_id}' -n flash "exec $command")"
 # Match the original pane geometry before swap so tmux cannot reflow and reset
 # the copy-mode viewport in split panes.
 tmux resize-window -t "$replica" -x "$width" -y "$height"
+tmux set-option -p -t "$replica" @tmux-flash-active 1
+tmux set-hook -p -t "$replica" 'after-copy-mode[tmux-flash-rs-guard]' \
+  'if-shell -F "#{==:#{@tmux-flash-active},1}" "send-keys -X cancel"'
 tmux swap-pane -s "$replica" -t "$pane" \; select-pane -t "$replica"

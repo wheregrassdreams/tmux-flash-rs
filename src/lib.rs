@@ -1,4 +1,5 @@
-use std::cmp::Ordering;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -11,10 +12,62 @@ pub struct Match {
 
 #[derive(Clone, Debug, Default)]
 pub struct Search {
-    pub lines: Vec<String>,
+    lines: Vec<IndexedLine>,
     pub pattern: String,
     pub cursor_x: usize,
     pub cursor_y: usize,
+    match_cache: RefCell<MatchCache>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MatchCache {
+    pattern: String,
+    case_insensitive: bool,
+    cursor_x: usize,
+    cursor_y: usize,
+    matches: Vec<Match>,
+    #[cfg(test)]
+    full_scans: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct IndexedLine {
+    text: String,
+    grapheme_offsets: Vec<usize>,
+    cell_columns: Vec<usize>,
+    lowercase: Vec<String>,
+}
+
+impl IndexedLine {
+    fn new(text: String) -> Self {
+        let mut grapheme_offsets = Vec::new();
+        let mut cell_columns = vec![0];
+        let mut lowercase_clusters = Vec::new();
+        let mut column = 0;
+
+        for (offset, cluster) in text.grapheme_indices(true) {
+            grapheme_offsets.push(offset);
+            column += grapheme_width(cluster);
+            cell_columns.push(column);
+            lowercase_clusters.push(lowercase(cluster));
+        }
+        grapheme_offsets.push(text.len());
+
+        Self {
+            text,
+            grapheme_offsets,
+            cell_columns,
+            lowercase: lowercase_clusters,
+        }
+    }
+
+    fn grapheme_count(&self) -> usize {
+        self.grapheme_offsets.len().saturating_sub(1)
+    }
+
+    fn grapheme(&self, index: usize) -> &str {
+        &self.text[self.grapheme_offsets[index]..self.grapheme_offsets[index + 1]]
+    }
 }
 
 fn lowercase(s: &str) -> String {
@@ -33,75 +86,147 @@ pub fn column_at(line: &str, grapheme_index: usize) -> usize {
 }
 
 impl Search {
+    pub fn new(lines: Vec<String>) -> Self {
+        Self {
+            lines: lines.into_iter().map(IndexedLine::new).collect(),
+            ..Self::default()
+        }
+    }
+
+    pub fn iter_lines(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().map(|line| line.text.as_str())
+    }
+
+    pub fn line(&self, row: usize) -> &str {
+        &self.lines[row].text
+    }
+
+    pub fn grapheme_count(&self, row: usize) -> usize {
+        self.lines[row].grapheme_count()
+    }
+
+    pub fn grapheme(&self, row: usize, index: usize) -> &str {
+        self.lines[row].grapheme(index)
+    }
+
     pub fn find_matches(&self) -> Vec<Match> {
         let needle: Vec<&str> = self.pattern.graphemes(true).collect();
+        let case_insensitive = self.pattern.chars().all(|ch| !ch.is_uppercase());
+        let mut cache = self.match_cache.borrow_mut();
+        let cursor_unchanged = cache.cursor_x == self.cursor_x && cache.cursor_y == self.cursor_y;
+
+        if cursor_unchanged
+            && cache.pattern == self.pattern
+            && cache.case_insensitive == case_insensitive
+        {
+            return cache.matches.clone();
+        }
+
+        let previous: Vec<&str> = cache.pattern.graphemes(true).collect();
+        let extends_previous = cursor_unchanged
+            && !cache.pattern.is_empty()
+            && cache.case_insensitive == case_insensitive
+            && needle.len() > previous.len()
+            && needle.starts_with(&previous);
+
+        if extends_previous {
+            let suffix = &needle[previous.len()..];
+            let folded_suffix: Vec<String> = if case_insensitive {
+                suffix.iter().map(|cluster| lowercase(cluster)).collect()
+            } else {
+                Vec::new()
+            };
+            cache.matches.retain_mut(|found| {
+                let line = &self.lines[found.row];
+                let matches_suffix = found.end + suffix.len() <= line.grapheme_count()
+                    && suffix.iter().enumerate().all(|(offset, cluster)| {
+                        let index = found.end + offset;
+                        if case_insensitive {
+                            line.lowercase[index] == folded_suffix[offset]
+                        } else {
+                            line.grapheme(index) == *cluster
+                        }
+                    });
+                if matches_suffix {
+                    found.end += suffix.len();
+                }
+                matches_suffix
+            });
+        } else {
+            #[cfg(test)]
+            {
+                cache.full_scans += 1;
+            }
+            cache.matches = self.scan_matches(&needle, case_insensitive);
+        }
+
+        cache.pattern.clone_from(&self.pattern);
+        cache.case_insensitive = case_insensitive;
+        cache.cursor_x = self.cursor_x;
+        cache.cursor_y = self.cursor_y;
+        cache.matches.clone()
+    }
+
+    fn scan_matches(&self, needle: &[&str], case_insensitive: bool) -> Vec<Match> {
         if needle.is_empty() {
             return Vec::new();
         }
-
-        let case_insensitive = self.pattern.chars().all(|ch| !ch.is_uppercase());
-        let needle: Vec<String> = needle
-            .into_iter()
-            .map(|cluster| {
-                if case_insensitive {
-                    lowercase(cluster)
-                } else {
-                    cluster.to_owned()
-                }
-            })
-            .collect();
-        let mut matches = Vec::new();
+        let folded_needle: Vec<String> = if case_insensitive {
+            needle.iter().map(|cluster| lowercase(cluster)).collect()
+        } else {
+            Vec::new()
+        };
+        let mut ranked_matches = Vec::new();
 
         for (row, line) in self.lines.iter().enumerate() {
-            let haystack: Vec<String> = line
-                .graphemes(true)
-                .map(|cluster| {
-                    if case_insensitive {
-                        lowercase(cluster)
-                    } else {
-                        cluster.to_owned()
-                    }
-                })
-                .collect();
-            if needle.len() > haystack.len() {
+            let grapheme_count = line.grapheme_count();
+            if needle.len() > grapheme_count {
                 continue;
             }
-            for start in 0..=haystack.len() - needle.len() {
-                if haystack[start..start + needle.len()] == needle {
-                    matches.push(Match {
-                        row,
-                        start,
-                        end: start + needle.len(),
-                    });
+
+            let row_distance = row.abs_diff(self.cursor_y);
+            for start in 0..=grapheme_count - needle.len() {
+                let matched = if case_insensitive {
+                    line.lowercase[start..start + needle.len()] == folded_needle
+                } else {
+                    needle
+                        .iter()
+                        .enumerate()
+                        .all(|(offset, cluster)| line.grapheme(start + offset) == *cluster)
+                };
+                if matched {
+                    let column_distance = line.cell_columns[start].abs_diff(self.cursor_x);
+                    ranked_matches.push((
+                        row_distance,
+                        column_distance,
+                        Match {
+                            row,
+                            start,
+                            end: start + needle.len(),
+                        },
+                    ));
                 }
             }
         }
 
-        matches.sort_by(|a, b| {
-            let a_y = a.row.abs_diff(self.cursor_y);
-            let b_y = b.row.abs_diff(self.cursor_y);
-            match a_y.cmp(&b_y) {
-                Ordering::Equal => {
-                    let a_x = column_at(&self.lines[a.row], a.start).abs_diff(self.cursor_x);
-                    let b_x = column_at(&self.lines[b.row], b.start).abs_diff(self.cursor_x);
-                    a_x.cmp(&b_x)
-                }
-                other => other,
-            }
-        });
-        matches
+        ranked_matches
+            .sort_by_key(|(row_distance, column_distance, _)| (*row_distance, *column_distance));
+        ranked_matches
+            .into_iter()
+            .map(|(_, _, found)| found)
+            .collect()
     }
 
     pub fn assign_labels(&self, matches: &[Match], alphabet: &str) -> Vec<(char, Match)> {
         let case_insensitive = self.pattern.chars().all(|ch| !ch.is_uppercase());
-        let mut continuations = Vec::new();
+        let mut continuations = HashSet::new();
         for found in matches {
-            let next = self.lines[found.row].graphemes(true).nth(found.end);
-            if let Some(next) = next {
-                continuations.push(if case_insensitive {
-                    lowercase(next)
+            let line = &self.lines[found.row];
+            if found.end < line.grapheme_count() {
+                continuations.insert(if case_insensitive {
+                    line.lowercase[found.end].as_str()
                 } else {
-                    next.to_owned()
+                    line.grapheme(found.end)
                 });
             }
         }
@@ -110,13 +235,11 @@ impl Search {
             .chars()
             .filter(|label| {
                 let label = label.to_string();
-                !continuations.iter().any(|next| {
-                    if case_insensitive {
-                        lowercase(&label) == *next
-                    } else {
-                        label == *next
-                    }
-                })
+                if case_insensitive {
+                    !continuations.contains(lowercase(&label).as_str())
+                } else {
+                    !continuations.contains(label.as_str())
+                }
             })
             .zip(matches.iter().cloned())
             .collect()
@@ -133,12 +256,9 @@ mod tests {
 
     #[test]
     fn ascii_smart_case_and_nearest_first() {
-        let mut search = Search {
-            lines: vec!["First foo".into(), "foo First".into()],
-            pattern: "foo".into(),
-            cursor_x: 4,
-            cursor_y: 0,
-        };
+        let mut search = Search::new(vec!["First foo".into(), "foo First".into()]);
+        search.pattern = "foo".into();
+        search.cursor_x = 4;
         let matches = search.find_matches();
         assert_eq!(
             matches,
@@ -161,11 +281,8 @@ mod tests {
 
     #[test]
     fn finds_cjk_and_emoji_graphemes() {
-        let search = Search {
-            lines: vec!["中文搜索：你好，🌈🙂 family 👩🏽‍💻".into()],
-            pattern: "你好".into(),
-            ..Search::default()
-        };
+        let mut search = Search::new(vec!["中文搜索：你好，🌈🙂 family 👩🏽‍💻".into()]);
+        search.pattern = "你好".into();
         assert_eq!(
             search.find_matches()[0],
             Match {
@@ -175,11 +292,7 @@ mod tests {
             }
         );
 
-        let search = Search {
-            lines: vec!["中文搜索：你好，🌈🙂 family 👩🏽‍💻".into()],
-            pattern: "👩🏽‍💻".into(),
-            ..Search::default()
-        };
+        search.pattern = "👩🏽‍💻".into();
         let found = search.find_matches();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].end - found[0].start, 1);
@@ -187,36 +300,28 @@ mod tests {
 
     #[test]
     fn treats_combining_sequence_as_one_search_unit() {
-        let search = Search {
-            lines: vec!["cafe\u{301} cafe\u{301}".into()],
-            pattern: "e\u{301}".into(),
-            ..Search::default()
-        };
+        let mut search = Search::new(vec!["cafe\u{301} cafe\u{301}".into()]);
+        search.pattern = "e\u{301}".into();
         assert_eq!(search.find_matches().len(), 2);
     }
 
     #[test]
     fn cursor_distance_uses_terminal_cell_columns() {
-        let search = Search {
-            lines: vec!["中x x".into()],
-            pattern: "x".into(),
-            cursor_x: 4,
-            ..Search::default()
-        };
+        let line = "中x x";
+        let mut search = Search::new(vec![line.into()]);
+        search.pattern = "x".into();
+        search.cursor_x = 4;
         let found = search.find_matches();
         assert_eq!(found[0].start, 3);
-        assert_eq!(column_at(&search.lines[0], found[0].start), 4);
+        assert_eq!(column_at(line, found[0].start), 4);
         assert_eq!(width("中"), 2);
         assert_eq!(width("👩🏽‍💻"), 2);
     }
 
     #[test]
     fn labels_skip_continuations_and_remain_ascii() {
-        let search = Search {
-            lines: vec!["cat 猫".into(), "cab".into()],
-            pattern: "ca".into(),
-            ..Search::default()
-        };
+        let mut search = Search::new(vec!["cat 猫".into(), "cab".into()]);
+        search.pattern = "ca".into();
         let matches = vec![
             Match {
                 row: 0,
@@ -232,5 +337,45 @@ mod tests {
         let labels = search.assign_labels(&matches, "tabc");
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0].0, 'a');
+    }
+
+    #[test]
+    fn extending_pattern_filters_previous_candidates_and_backspace_rescans() {
+        let mut search = Search::new(vec![
+            "foobar foo bar".into(),
+            "foobaz".into(),
+            "FOOBAR".into(),
+        ]);
+
+        search.pattern = "foo".into();
+        let foo_matches = search.find_matches();
+        assert_eq!(foo_matches.len(), 4);
+        assert_eq!(search.match_cache.borrow().full_scans, 1);
+
+        search.pattern.push('b');
+        let foob_matches = search.find_matches();
+        assert_eq!(foob_matches.len(), 3);
+        assert!(
+            foob_matches
+                .iter()
+                .all(|found| found.end - found.start == 4)
+        );
+        assert_eq!(search.match_cache.borrow().full_scans, 1);
+
+        search.pattern.pop();
+        assert_eq!(search.find_matches(), foo_matches);
+        assert_eq!(search.match_cache.borrow().full_scans, 2);
+    }
+
+    #[test]
+    fn first_character_and_case_mode_changes_use_full_scan() {
+        let mut search = Search::new(vec!["foo Foo FOO".into()]);
+        search.pattern = "f".into();
+        assert_eq!(search.find_matches().len(), 3);
+        assert_eq!(search.match_cache.borrow().full_scans, 1);
+
+        search.pattern.push('O');
+        assert_eq!(search.find_matches().len(), 0);
+        assert_eq!(search.match_cache.borrow().full_scans, 2);
     }
 }
