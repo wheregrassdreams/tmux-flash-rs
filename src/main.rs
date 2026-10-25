@@ -481,11 +481,11 @@ fn resize_detected(
     resize_fd: libc::c_int,
     expected: (usize, usize),
 ) -> io::Result<bool> {
-    if resize_signal_pending(resize_fd)? {
-        return Ok(true);
-    }
-    let size_changed = terminal_size(terminal_fd)? != expected;
-    Ok(size_changed || resize_signal_pending(resize_fd)?)
+    // SIGWINCH can be delivered even when the pane's effective size did not
+    // change (for example, when the outer terminal is resized). Treat it as a
+    // wake-up only; the TTY dimensions are authoritative for cancellation.
+    let _ = resize_signal_pending(resize_fd)?;
+    Ok(terminal_size(terminal_fd)? != expected)
 }
 
 fn wait_for_initial_size(
@@ -788,10 +788,10 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                 panes.restore();
                 return Ok(());
             }
-            InputEvent::Resized => {
-                cancel_after_resize(&mut panes, &options.original);
-                return Ok(());
-            }
+            // A resize signal is also our wake-up mechanism. The dimension
+            // check above already cancels on a real change; otherwise keep
+            // the current search active.
+            InputEvent::Resized => continue,
         };
         match ch {
             '\u{1b}' | '\u{3}' => {
