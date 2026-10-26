@@ -83,6 +83,12 @@ set -g @flash-color-match-bg '#385d8a'
 set -g @flash-color-current-bg '#23734f'
 ```
 
+## Known issues
+
+Entering Flash from a zoomed pane can cause a noticeable visual flicker while
+the screen is redrawn. The pane stays zoomed and the selected match is correct,
+but the flicker is not currently resolved.
+
 ## Unicode behavior
 
 Search operates on grapheme clusters. Match proximity and jump positions use

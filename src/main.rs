@@ -251,18 +251,30 @@ impl PaneRestore {
             return;
         }
         self.restored = true;
-        let mut restore = vec![
-            "swap-pane",
-            "-s",
-            self.me.as_str(),
-            "-t",
-            self.original.as_str(),
-        ];
+        let mut restore = vec!["swap-pane"];
         if self.original_zoomed {
-            restore.extend([";", "resize-pane", "-Z", "-t", self.original.as_str()]);
+            restore.push("-Z");
         }
+        restore.extend(["-s", self.me.as_str(), "-t", self.original.as_str()]);
         restore.extend([";", "select-pane", "-t", self.original.as_str()]);
-        let _ = tmux(&restore);
+        if tmux(&restore).is_err() && self.original_zoomed {
+            let _ = tmux(&[
+                "swap-pane",
+                "-s",
+                self.me.as_str(),
+                "-t",
+                self.original.as_str(),
+                ";",
+                "resize-pane",
+                "-Z",
+                "-t",
+                self.original.as_str(),
+                ";",
+                "select-pane",
+                "-t",
+                self.original.as_str(),
+            ]);
+        }
         let _ = tmux(&[
             "set-hook",
             "-p",

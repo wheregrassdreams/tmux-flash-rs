@@ -62,9 +62,15 @@ tmux set-option -p -t "$replica" @tmux-flash-active 1
 tmux set-hook -p -t "$replica" 'after-copy-mode[tmux-flash-rs-guard]' \
   'if-shell -F "#{==:#{@tmux-flash-active},1}" "send-keys -X cancel"'
 if [[ "$zoomed" == 1 ]]; then
-  tmux swap-pane -s "$replica" -t "$pane" \; \
-    resize-pane -Z -t "$replica" \; \
-    select-pane -t "$replica"
+  if tmux swap-pane -Z -s "$replica" -t "$pane" \; \
+    select-pane -t "$replica"; then
+    :
+  else
+    # Older tmux versions do not support swap-pane -Z.
+    tmux swap-pane -s "$replica" -t "$pane" \; \
+      resize-pane -Z -t "$replica" \; \
+      select-pane -t "$replica"
+  fi
 else
   tmux swap-pane -s "$replica" -t "$pane" \; \
     select-pane -t "$replica"
